@@ -23,7 +23,11 @@ uint16_t verbose;
 #define VERBOSE_MIDISH           0x40
 
 const char prog_name[] = "midish frontend";
-const char prog_ver[] = "beta 0.1";
+const char prog_ver[] = "beta 0.2";
+/*
+ * beta 0.1 zaciname
+ * beta 0.2 davame sanci i ostatnim procesum, pribyl parametr --sleep
+ */
 
 void error(const char *format, ...) {
   va_list ap;
@@ -260,21 +264,23 @@ void seqmidi_init(void) {
   if ((status = system(str)) != 0) seqmidi_error(status, "Could not connect to ctrl port"); //provedeme to    
 }
 
-void seqmidi_proc(void) {
+int seqmidi_proc(void) {
   int status;
+  int ct;
   snd_seq_event_t *ev = NULL;
 
+  ct = 0;
   for (;;) {
-    switch (status = snd_seq_event_input(seq_handle, &ev)) {
+    switch (status = snd_seq_event_input(seq_handle, &ev)) { //mrkneme, co mame za udalost
       case -ENOSPC: //prusvih, preteceni
         seqmidi_error(status, "snd_seq_event_input overun!");
-        return;
+        return ct; //vracime pocet pruchodu smyckou
       case -EAGAIN: //nic neprislo
-        return; //slus
+        return ct;//slus
       default:
         if (status < 0) {
           seqmidi_error(status, "snd_seq_event_input error");
-          return;
+          return ct;
         }
         switch (ev->type) {
           case SND_SEQ_EVENT_NOTEON:
@@ -291,7 +297,8 @@ void seqmidi_proc(void) {
             break;
         }
         break;
-    } //hura mame udalost
+    }
+    ct++;
   }
 }
 
@@ -430,6 +437,7 @@ void help(void) {
           "\n-c --controller  midi controller to learn key presset"
           "\n-v               max. verbose"
           "\n-verbose         verbose with mask: .0=raw .1=event .2=file .3=cfg .4=preset .5=command .6=midish"
+          "\n-s --sleep       main loop idle sleep [us]"
           "\n"
           "\n"
           "\nConfiguration file"
@@ -485,10 +493,11 @@ void int_handler(int dummy) {
 //Start cele "aplikace"
 
 int main(int argc, char** argv) {
-  int pct, i;
+  int pct, i, linep,mainsleep;
   char* cfgfile;
   struct sigaction act;
-
+  char line[128], c;
+  
   kbd_init();
   ext_brk = 0;
   act.sa_handler = int_handler;
@@ -499,6 +508,7 @@ int main(int argc, char** argv) {
   portname = NULL;
   cfgfile = NULL;
   verbose = 0;
+  mainsleep=20000;
   if (argc <= 1) {
     help();
     return EXIT_SUCCESS;
@@ -526,6 +536,8 @@ int main(int argc, char** argv) {
         verbose = -1;
       } else if (strcmp(argv[pct], "--verbose") == 0) {
         verbose = atoi(argv[++pct]); //nabereme masku pro ukecanost
+      } else if ((strcmp(argv[pct], "-s") == 0) || (strcmp(argv[pct], "--sleep") == 0)) {
+        mainsleep = atoi(argv[++pct]); //nabereme kanal        
       }
       pct++;
     }
@@ -542,8 +554,24 @@ int main(int argc, char** argv) {
   //rawmidi_init(); //inicalizace midi procesoru
   seqmidi_init(); //inicializace midi rozhrani
   while (ext_brk == 0) {
+    if ((c = kbd_getc()) != 0) { //cteme cudl a pokud neco dorazilo
+      if (c != '\n') { //pokud to neni konec radku
+        line[linep] = c; //ulozime znak
+        if (linep < (sizeof (line) - 1)) linep++; //cuknem ukazovadlem s testem pretoceni
+        continue; //a hlavni smycka znova
+      }
+      line[linep] = 0; //dame tam koncovku      
+      if ((strcmp(line, "exit") == 0) || (strcmp(line, "q") == 0) || (strcmp(line, "x") == 0)) { //pokud to je konex
+        break; //tak koncujeme
+      } else if ((strcmp(line, "help") == 0) || (strcmp(line, "h") == 0)) { //help
+        printf("q,x,exit ...... exit\n");
+      } else { //a ostatni prikazy pripadne predhazujeme callbackem k uzivatelskemu zpracovani        
+      }
+      linep = 0; //a jdeme prijimat dalsi radek
+      putchar('\n');
+    }
     //rawmidi_proc();
-    seqmidi_proc();
+    if (seqmidi_proc() == 0) usleep(mainsleep);
   }
   stop_midish(); //zarazim midish
   kbd_done();
