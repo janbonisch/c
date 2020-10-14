@@ -23,10 +23,11 @@ uint16_t verbose;
 #define VERBOSE_MIDISH           0x40
 
 const char prog_name[] = "midish frontend";
-const char prog_ver[] = "beta 0.2";
+const char prog_ver[] = "beta 0.3";
 /*
  * beta 0.1 zaciname
  * beta 0.2 davame sanci i ostatnim procesum, pribyl parametr --sleep
+ * beta 0.3 spousteni prikazu pri aktivaci presetu
  */
 
 void error(const char *format, ...) {
@@ -35,6 +36,17 @@ void error(const char *format, ...) {
   vfprintf(stderr, format, ap);
   va_end(ap);
   putc('\n', stderr);
+}
+
+void midi_error(int code, const char* msg) {
+  char* str;
+  int l;
+
+  l = strlen(msg) + 32;
+  str = alloca(l);
+  snprintf(str, l, "%s (code=%d)", msg, code);
+  error(str);
+  exit(EXIT_FAILURE);
 }
 
 //------------------------------------------------------------------------------
@@ -130,21 +142,30 @@ void start_midish(void) {
 //ukonceni MIDISH
 
 void stop_midish(void) {
-  pclose(midish);
+  //pclose(midish); //jak se pousti i dalsi procesove, tak to nechce chcipnout, tudis na to dlabu exit z mainu to vyresi za me 
 }
 
 //Nastavy zvoleny preset
 
 void midish_set_preset(CFG_PRESET* pp) {
   CFG_LINE* l;
+  char* str;
+  int status;
 
   if ((verbose & VERBOSE_PRESET_CHANGE) != 0) printf("Set preset '%s'\n", pp->name);
   l = pp->midishcmd;
   while (l != NULL) {
-    if ((verbose & VERBOSE_COMMAND) != 0) printf("%s\n", &l->line);
-    fprintf(midish, "%s\n", &l->line);
-    fflush(midish);
+    str=&l->line; //tady je retezec
     l = l->next;
+    if (*str=='*') {      
+      str++;
+      if ((verbose & VERBOSE_COMMAND) != 0) printf("exec: %s\n", str);       
+      if ((status = system(str)) != 0) midi_error(status, "exec error"); //provedeme to    
+    } else {
+      if ((verbose & VERBOSE_COMMAND) != 0) printf("%s\n", str);
+      fprintf(midish, "%s\n", str);
+      fflush(midish);      
+    }
   }
 }
 
@@ -159,7 +180,7 @@ uint8_t event_param; //z ceho berem parametr
 void midi_proc_event(uint8_t cmd, uint8_t data1, uint8_t data2) {
   CFG_PRESET* pp;
 
-  if ((verbose & VERBOSE_MIDI_EVENT) != 0) printf("event %02X %d %d\n", (int) cmd, (int) data1, (int) data2);
+  if ((verbose & VERBOSE_MIDI_EVENT) != 0) printf("event %02x %d %d\n", (int) cmd, (int) data1, (int) data2);
   if (cmd == event_trigger) { //pokud je to kontroler na spravnem kanale
     if (data1 == preset.param) { //pokud je to kontroler, ktery ridi prepnuti, tak hura
       if (data2 < 0x40) { //kontroler vypnut
@@ -241,27 +262,16 @@ void rawmidi_proc(void) {
 static snd_seq_t *seq_handle;
 static int in_port;
 
-void seqmidi_error(int code, const char* msg) {
-  char* str;
-  int l;
-
-  l = strlen(msg) + 32;
-  str = alloca(l);
-  snprintf(str, l, "%s (code=%d)", msg, code);
-  error(str);
-  exit(EXIT_FAILURE);
-}
-
 void seqmidi_init(void) {
   char str[128];
   int status;
 
-  if ((status = snd_seq_open(&seq_handle, "default", SND_SEQ_OPEN_INPUT, 0)) != 0) seqmidi_error(status, "Could not open sequencer");
-  if ((status = snd_seq_set_client_name(seq_handle, prog_name)) != 0) seqmidi_error(status, "Could not set client name");
-  if ((in_port = snd_seq_create_simple_port(seq_handle, "in", SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_SUBS_WRITE, SND_SEQ_PORT_TYPE_APPLICATION)) < 0) seqmidi_error(in_port, "Could not open port");
-  if ((status = snd_seq_nonblock(seq_handle, 1)) != 0) seqmidi_error(status, "Could not set nonblock mode");
+  if ((status = snd_seq_open(&seq_handle, "default", SND_SEQ_OPEN_INPUT, 0)) != 0) midi_error(status, "Could not open sequencer");
+  if ((status = snd_seq_set_client_name(seq_handle, prog_name)) != 0) midi_error(status, "Could not set client name");
+  if ((in_port = snd_seq_create_simple_port(seq_handle, "in", SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_SUBS_WRITE, SND_SEQ_PORT_TYPE_APPLICATION)) < 0) midi_error(in_port, "Could not open port");
+  if ((status = snd_seq_nonblock(seq_handle, 1)) != 0) midi_error(status, "Could not set nonblock mode");
   snprintf(str, sizeof (str), "aconnect '%s' '%s'\n", portname, prog_name); //pripravim si prikaz pro spojeni
-  if ((status = system(str)) != 0) seqmidi_error(status, "Could not connect to ctrl port"); //provedeme to    
+  if ((status = system(str)) != 0) midi_error(status, "Could not connect to ctrl port"); //provedeme to    
 }
 
 int seqmidi_proc(void) {
@@ -273,13 +283,13 @@ int seqmidi_proc(void) {
   for (;;) {
     switch (status = snd_seq_event_input(seq_handle, &ev)) { //mrkneme, co mame za udalost
       case -ENOSPC: //prusvih, preteceni
-        seqmidi_error(status, "snd_seq_event_input overun!");
+        midi_error(status, "snd_seq_event_input overun!");
         return ct; //vracime pocet pruchodu smyckou
       case -EAGAIN: //nic neprislo
         return ct;//slus
       default:
         if (status < 0) {
-          seqmidi_error(status, "snd_seq_event_input error");
+          midi_error(status, "snd_seq_event_input error");
           return ct;
         }
         switch (ev->type) {
@@ -444,8 +454,9 @@ void help(void) {
           "\n=================="
           "\n"
           "\nConfiguration file contains three type of lines:"
-          "\nline starts with @ is a preset configuration, next lines contains commands to send to midish after preset activation"
+          "\nline starts with @ is a preset configuration, next lines contains commands to send to midish after preset activation"          
           "\nline starts with '#', ';' or '//' is a comment"
+          "\nline starts with * is a command for execute"
           "\nother lines are commands for midish"
           "\n(empty lines are not send to midish)"
           "\n"
